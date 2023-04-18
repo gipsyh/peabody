@@ -1,11 +1,13 @@
 mod ops;
+use std::fmt::Debug;
+
 pub use ops::*;
 
 mod node;
 
 use node::{BddNode, BddPointer, BddVariable};
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 pub struct Bdd(Vec<BddNode>);
 
 impl Bdd {
@@ -68,6 +70,43 @@ impl Bdd {
 impl AsRef<Bdd> for Bdd {
     fn as_ref(&self) -> &Bdd {
         self
+    }
+}
+
+impl Debug for Bdd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.sat_cubes())
+    }
+}
+
+impl Bdd {
+    pub fn sat_cubes_rec(
+        &self,
+        node: BddPointer,
+        cube: &mut Vec<isize>,
+        res: &mut Vec<Vec<isize>>,
+    ) {
+        if node.is_constant(false) {
+            return;
+        }
+        if node.is_constant(true) {
+            res.push(cube.to_vec());
+            return;
+        }
+        let var = self.var_of(node).0 as isize;
+        cube.push(var);
+        self.sat_cubes_rec(self.high_link_of(node), cube, res);
+        cube.pop().unwrap();
+        cube.push(-var);
+        self.sat_cubes_rec(self.low_link_of(node), cube, res);
+        cube.pop().unwrap();
+    }
+
+    pub fn sat_cubes(&self) -> Vec<Vec<isize>> {
+        let mut res = Vec::new();
+        let mut cube = Vec::new();
+        self.sat_cubes_rec(self.root_pointer(), &mut cube, &mut res);
+        res
     }
 }
 
