@@ -1,4 +1,4 @@
-use crate::{Bdd, BddPointer, PeabodyInner};
+use crate::{ops::BddOps, Bdd, BddPointer, PeabodyInner};
 use std::{cmp::min, collections::HashSet};
 
 #[inline]
@@ -20,13 +20,23 @@ impl PeabodyInner {
         if bdd.is_constant(true) || bdd.is_constant(false) {
             return bdd;
         }
+        let bdd_op = if next {
+            BddOps::NextState(bdd)
+        } else {
+            BddOps::OriginalState(bdd)
+        };
+        if let Some(res) = self.ops_cache_get(bdd_op) {
+            return res;
+        }
         let var = self.var_of(bdd);
         assert!(state_is(var, !next));
         let low = self.low_of(bdd);
         let high = self.high_of(bdd);
         let low = self.state_transform_rec(low, next);
         let high = self.state_transform_rec(high, next);
-        self.new_node(state_to(var, next), low, high)
+        let res = self.new_node(state_to(var, next), low, high);
+        self.ops_cache_set(bdd_op, res);
+        res
     }
 
     pub fn and_exist_rec(
@@ -62,6 +72,54 @@ impl PeabodyInner {
             self.new_node(decision_var, low, high)
         }
     }
+
+    pub fn image_rec(
+        &mut self,
+        mut left: BddPointer,
+        mut right: BddPointer,
+        post: bool,
+    ) -> BddPointer {
+        if left.is_constant(false) || right.is_constant(false) {
+            return BddPointer::constant(false);
+        }
+        if left.is_constant(true) && right.is_constant(true) {
+            return BddPointer::constant(true);
+        }
+        if left > right {
+            (left, right) = (right, left)
+        }
+        let bdd_op = if post {
+            BddOps::PostImage(left, right)
+        } else {
+            BddOps::PreImage(left, right)
+        };
+        if let Some(res) = self.ops_cache_get(bdd_op) {
+            return res;
+        }
+        let lv = self.var_of(left);
+        let rv = self.var_of(right);
+        let decision_var = min(lv, rv);
+        let (l_low, l_high) = if lv <= rv {
+            (self.low_of(left), self.high_of(left))
+        } else {
+            (left, left)
+        };
+        let (r_low, r_high) = if rv <= lv {
+            (self.low_of(right), self.high_of(right))
+        } else {
+            (right, right)
+        };
+        let low = self.image_rec(l_low, r_low, post);
+        let high = self.image_rec(l_high, r_high, post);
+        let res =
+            if (post && state_is(decision_var, false)) || (!post && state_is(decision_var, true)) {
+                self.or(low, high)
+            } else {
+                self.new_node(decision_var, low, high)
+            };
+        self.ops_cache_set(bdd_op, res);
+        res
+    }
 }
 
 impl Bdd {
@@ -95,12 +153,21 @@ impl Bdd {
 
     pub fn pre_image(&self, trans: &Bdd) -> Self {
         let state = self.next_state();
-        state.and_exist(trans, (0..200).filter(|x| x % 2 == 1))
+        let res = self
+            .manager
+            .lock()
+            .unwrap()
+            .image_rec(state.pointer, trans.pointer, false);
+        Bdd::new(&self.manager, res)
     }
 
     pub fn post_image(&self, trans: &Bdd) -> Self {
-        self.and_exist(trans, (0..200).filter(|x| x % 2 == 0))
-            .original_state()
+        let res = self
+            .manager
+            .lock()
+            .unwrap()
+            .image_rec(self.pointer, trans.pointer, true);
+        Bdd::new(&self.manager, res).original_state()
     }
 }
 

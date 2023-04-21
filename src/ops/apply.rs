@@ -1,3 +1,4 @@
+use super::BddOps;
 use crate::{Bdd, BddPointer, PeabodyInner};
 use std::{
     cmp::min,
@@ -5,20 +6,24 @@ use std::{
 };
 
 impl PeabodyInner {
-    pub(crate) fn apply_rec<T>(
+    fn apply_rec<T: ApplyOp>(
         &mut self,
         mut left: BddPointer,
         mut right: BddPointer,
         apply_op: T,
-    ) -> BddPointer
-    where
-        T: Copy + Fn(Option<bool>, Option<bool>) -> Option<bool>,
-    {
-        if let Some(res) = apply_op(left.as_bool(), right.as_bool()).map(BddPointer::from_bool) {
+    ) -> BddPointer {
+        if let Some(res) = apply_op
+            .terminal(left.as_bool(), right.as_bool())
+            .map(BddPointer::from_bool)
+        {
             return res;
         }
         if left > right {
             (left, right) = (right, left)
+        }
+        let bdd_op = apply_op.bdd_ops(left, right);
+        if let Some(res) = self.ops_cache_get(bdd_op) {
+            return res;
         }
         let lv = self.var_of(left);
         let rv = self.var_of(right);
@@ -35,12 +40,23 @@ impl PeabodyInner {
         };
         let low = self.apply_rec(l_low, r_low, apply_op);
         let high = self.apply_rec(l_high, r_high, apply_op);
-        self.new_node(decision_var, low, high)
+        let res = self.new_node(decision_var, low, high);
+        self.ops_cache_set(bdd_op, res);
+        res
     }
 }
 
-mod apply_op {
-    pub fn and(l: Option<bool>, r: Option<bool>) -> Option<bool> {
+trait ApplyOp: Copy {
+    fn terminal(&self, l: Option<bool>, r: Option<bool>) -> Option<bool>;
+
+    fn bdd_ops(&self, left: BddPointer, right: BddPointer) -> BddOps;
+}
+
+#[derive(Clone, Copy)]
+struct AndOp;
+
+impl ApplyOp for AndOp {
+    fn terminal(&self, l: Option<bool>, r: Option<bool>) -> Option<bool> {
         match (l, r) {
             (Some(true), Some(true)) => Some(true),
             (Some(false), _) => Some(false),
@@ -49,7 +65,16 @@ mod apply_op {
         }
     }
 
-    pub fn or(l: Option<bool>, r: Option<bool>) -> Option<bool> {
+    fn bdd_ops(&self, left: BddPointer, right: BddPointer) -> BddOps {
+        BddOps::And(left, right)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct OrOp;
+
+impl ApplyOp for OrOp {
+    fn terminal(&self, l: Option<bool>, r: Option<bool>) -> Option<bool> {
         match (l, r) {
             (Some(false), Some(false)) => Some(false),
             (Some(true), _) => Some(true),
@@ -58,41 +83,54 @@ mod apply_op {
         }
     }
 
-    pub fn xor(l: Option<bool>, r: Option<bool>) -> Option<bool> {
+    fn bdd_ops(&self, left: BddPointer, right: BddPointer) -> BddOps {
+        BddOps::Or(left, right)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct XorOp;
+
+impl ApplyOp for XorOp {
+    fn terminal(&self, l: Option<bool>, r: Option<bool>) -> Option<bool> {
         match (l, r) {
             (Some(l), Some(r)) => Some(l ^ r),
             _ => None,
         }
     }
 
-    pub fn imp(l: Option<bool>, r: Option<bool>) -> Option<bool> {
-        match (l, r) {
-            (Some(true), Some(false)) => Some(false),
-            (Some(false), _) => Some(true),
-            (_, Some(true)) => Some(true),
-            _ => None,
-        }
-    }
-
-    pub fn iff(l: Option<bool>, r: Option<bool>) -> Option<bool> {
-        match (l, r) {
-            (Some(l), Some(r)) => Some(l == r),
-            _ => None,
-        }
+    fn bdd_ops(&self, left: BddPointer, right: BddPointer) -> BddOps {
+        BddOps::Xor(left, right)
     }
 }
 
+// pub fn imp(l: Option<bool>, r: Option<bool>) -> Option<bool> {
+//     match (l, r) {
+//         (Some(true), Some(false)) => Some(false),
+//         (Some(false), _) => Some(true),
+//         (_, Some(true)) => Some(true),
+//         _ => None,
+//     }
+// }
+
+// pub fn iff(l: Option<bool>, r: Option<bool>) -> Option<bool> {
+//     match (l, r) {
+//         (Some(l), Some(r)) => Some(l == r),
+//         _ => None,
+//     }
+// }
+
 impl PeabodyInner {
     pub(crate) fn and(&mut self, left: BddPointer, right: BddPointer) -> BddPointer {
-        self.apply_rec(left, right, apply_op::and)
+        self.apply_rec(left, right, AndOp)
     }
 
     pub(crate) fn or(&mut self, left: BddPointer, right: BddPointer) -> BddPointer {
-        self.apply_rec(left, right, apply_op::or)
+        self.apply_rec(left, right, OrOp)
     }
 
     pub(crate) fn xor(&mut self, left: BddPointer, right: BddPointer) -> BddPointer {
-        self.apply_rec(left, right, apply_op::xor)
+        self.apply_rec(left, right, XorOp)
     }
 }
 

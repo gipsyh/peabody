@@ -39,6 +39,13 @@ impl Bdd {
     }
 }
 
+impl Bdd {
+    #[inline]
+    pub fn is_constant(&self, val: bool) -> bool {
+        self.pointer.is_constant(val)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub(crate) struct BddPointer(pub u32);
 

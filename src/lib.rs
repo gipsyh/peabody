@@ -6,6 +6,7 @@ pub use node::*;
 mod ops;
 
 use fxhash::FxBuildHasher;
+use ops::BddOps;
 use std::{
     assert_matches::assert_matches,
     collections::HashMap,
@@ -16,6 +17,7 @@ use std::{
 pub(crate) struct PeabodyInner {
     nodes: Vec<BddNode>,
     existing: HashMap<BddNode, BddPointer, FxBuildHasher>,
+    ops_cache: HashMap<BddOps, BddPointer, FxBuildHasher>,
 }
 
 impl PeabodyInner {
@@ -51,10 +53,27 @@ impl PeabodyInner {
 }
 
 impl PeabodyInner {
+    pub fn ops_cache_get(&self, op: BddOps) -> Option<BddPointer> {
+        self.ops_cache.get(&op).cloned()
+    }
+
+    pub fn ops_cache_set(&mut self, op: BddOps, bdd: BddPointer) {
+        if let Some(b) = self.ops_cache.insert(op, bdd) {
+            assert_eq!(b, bdd)
+        }
+    }
+}
+
+impl PeabodyInner {
     pub fn new() -> Self {
         let nodes = vec![BddNode::constant(false), BddNode::constant(true)];
         let existing = HashMap::with_hasher(FxBuildHasher::default());
-        Self { nodes, existing }
+        let ops_cache = HashMap::with_hasher(FxBuildHasher::default());
+        Self {
+            nodes,
+            existing,
+            ops_cache,
+        }
     }
 
     pub fn ith_var(&mut self, var: usize) -> BddPointer {
@@ -82,6 +101,10 @@ impl Peabody {
         Self {
             inner: Arc::new(Mutex::new(PeabodyInner::new())),
         }
+    }
+
+    pub fn constant(&self, val: bool) -> Bdd {
+        Bdd::new(&self.inner, BddPointer::constant(val))
     }
 
     pub fn ith_var(&self, var: usize) -> Bdd {
