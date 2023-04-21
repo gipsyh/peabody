@@ -1,194 +1,227 @@
-use super::op_function;
-use crate::*;
-use fxhash::FxBuildHasher;
-use std::{cmp::min, collections::HashMap};
+use crate::{Bdd, BddPointer, PeabodyInner};
+use std::{
+    cmp::min,
+    ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign},
+};
 
-pub fn apply_with_flip<T>(
-    left: &Bdd,
-    right: &Bdd,
-    flip_left_if: Option<BddVariable>,
-    flip_right_if: Option<BddVariable>,
-    flip_out_if: Option<BddVariable>,
-    terminal_lookup: T,
-) -> Bdd
-where
-    T: Fn(Option<bool>, Option<bool>) -> Option<bool>,
-{
-    let mut result: Bdd = Bdd::constant(true);
-    let mut is_not_empty = false;
-
-    let mut existing: HashMap<BddNode, BddPointer, FxBuildHasher> =
-        HashMap::with_capacity_and_hasher(
-            left.num_node().max(right.num_node()),
-            FxBuildHasher::default(),
-        );
-    existing.insert(BddNode::mk_constant(false), BddPointer::constant(false));
-    existing.insert(BddNode::mk_constant(true), BddPointer::constant(true));
-
-    #[derive(Eq, PartialEq, Hash, Copy, Clone)]
-    struct Task {
-        left: BddPointer,
-        right: BddPointer,
-    }
-
-    let mut stack: Vec<Task> = Vec::with_capacity(left.num_node().max(right.num_node()));
-    stack.push(Task {
-        left: left.root_pointer(),
-        right: right.root_pointer(),
-    });
-
-    let mut finished: HashMap<Task, BddPointer, FxBuildHasher> = HashMap::with_capacity_and_hasher(
-        left.num_node().max(right.num_node()),
-        FxBuildHasher::default(),
-    );
-
-    while let Some(on_stack) = stack.last() {
-        if finished.contains_key(on_stack) {
-            stack.pop();
-        } else {
-            let (l, r) = (on_stack.left, on_stack.right);
-            let (l_v, r_v) = (left.var_of(l), right.var_of(r));
-            let decision_var = min(l_v, r_v);
-            let (l_low, l_high) = if l_v != decision_var {
-                (l, l)
-            } else if Some(l_v) == flip_left_if {
-                (left.high_link_of(l), left.low_link_of(l))
-            } else {
-                (left.low_link_of(l), left.high_link_of(l))
-            };
-            let (r_low, r_high) = if r_v != decision_var {
-                (r, r)
-            } else if Some(r_v) == flip_right_if {
-                (right.high_link_of(r), right.low_link_of(r))
-            } else {
-                (right.low_link_of(r), right.high_link_of(r))
-            };
-            let comp_low = Task {
-                left: l_low,
-                right: r_low,
-            };
-            let comp_high = Task {
-                left: l_high,
-                right: r_high,
-            };
-            let new_low = terminal_lookup(l_low.as_bool(), r_low.as_bool())
-                .map(BddPointer::from_bool)
-                .or_else(|| finished.get(&comp_low).cloned());
-            let new_high = terminal_lookup(l_high.as_bool(), r_high.as_bool())
-                .map(BddPointer::from_bool)
-                .or_else(|| finished.get(&comp_high).cloned());
-            if let (Some(new_low), Some(new_high)) = (new_low, new_high) {
-                if new_low.is_constant(true) || new_high.is_constant(true) {
-                    is_not_empty = true
-                }
-
-                if new_low == new_high {
-                    finished.insert(*on_stack, new_low);
-                } else {
-                    let node = if flip_out_if == Some(decision_var) {
-                        BddNode::mk_node(decision_var, new_high, new_low)
-                    } else {
-                        BddNode::mk_node(decision_var, new_low, new_high)
-                    };
-                    if let Some(index) = existing.get(&node) {
-                        finished.insert(*on_stack, *index);
-                    } else {
-                        result.push_node(node);
-                        existing.insert(node, result.root_pointer());
-                        finished.insert(*on_stack, result.root_pointer());
-                    }
-                }
-                stack.pop();
-            } else {
-                if flip_out_if == Some(decision_var) {
-                    if new_high.is_none() {
-                        stack.push(comp_high);
-                    }
-                    if new_low.is_none() {
-                        stack.push(comp_low);
-                    }
-                } else {
-                    if new_low.is_none() {
-                        stack.push(comp_low);
-                    }
-                    if new_high.is_none() {
-                        stack.push(comp_high);
-                    }
-                }
-            }
-        }
-    }
-
-    if is_not_empty {
-        result
-    } else {
-        Bdd::constant(false)
-    }
-}
-
-fn apply<T>(left: &Bdd, right: &Bdd, terminal_lookup: T) -> Bdd
-where
-    T: Fn(Option<bool>, Option<bool>) -> Option<bool>,
-{
-    apply_with_flip(left, right, None, None, None, terminal_lookup)
-}
-
-impl Bdd {
-    pub fn and(&self, right: &Bdd) -> Bdd {
-        apply(self, right, op_function::and)
-    }
-
-    pub fn or(&self, right: &Bdd) -> Bdd {
-        apply(self, right, op_function::or)
-    }
-
-    pub fn imp(&self, right: &Bdd) -> Bdd {
-        apply(self, right, op_function::imp)
-    }
-
-    pub fn iff(&self, right: &Bdd) -> Bdd {
-        apply(self, right, op_function::iff)
-    }
-
-    pub fn xor(&self, right: &Bdd) -> Bdd {
-        apply(self, right, op_function::xor)
-    }
-
-    pub fn and_not(&self, right: &Bdd) -> Bdd {
-        apply(self, right, op_function::and_not)
-    }
-}
-
-pub struct ApplyContext<'a, T> {
-    left: &'a Bdd,
-    right: &'a Bdd,
-    op: T,
-    result: Bdd,
-    existing: HashMap<BddNode, BddPointer, FxBuildHasher>,
-}
-
-impl<'a, T> ApplyContext<'a, T> {
-    pub fn new(left: &'a Bdd, right: &'a Bdd, op: T) -> Self {
-        let mut result: Bdd = Bdd::constant(true);
-        let mut is_not_empty = false;
-        let mut existing: HashMap<BddNode, BddPointer, FxBuildHasher> =
-            HashMap::with_capacity_and_hasher(
-                left.num_node().max(right.num_node()),
-                FxBuildHasher::default(),
-            );
-        existing.insert(BddNode::mk_constant(false), BddPointer::constant(false));
-        existing.insert(BddNode::mk_constant(true), BddPointer::constant(true));
-        Self {
-            left,
-            right,
-            op,
-            result,
-        }
-    }
-
-    pub fn apply_rec(&mut self, left: &BddPointer, right: &BddPointer)
+impl PeabodyInner {
+    pub(crate) fn apply_rec<T>(
+        &mut self,
+        mut left: BddPointer,
+        mut right: BddPointer,
+        apply_op: T,
+    ) -> BddPointer
     where
-        T: Fn(Option<bool>, Option<bool>) -> Option<bool>,
+        T: Copy + Fn(Option<bool>, Option<bool>) -> Option<bool>,
     {
+        if let Some(res) = apply_op(left.as_bool(), right.as_bool()).map(BddPointer::from_bool) {
+            return res;
+        }
+        if left > right {
+            (left, right) = (right, left)
+        }
+        let lv = self.var_of(left);
+        let rv = self.var_of(right);
+        let decision_var = min(lv, rv);
+        let (l_low, l_high) = if lv <= rv {
+            (self.low_of(left), self.high_of(left))
+        } else {
+            (left, left)
+        };
+        let (r_low, r_high) = if rv <= lv {
+            (self.low_of(right), self.high_of(right))
+        } else {
+            (right, right)
+        };
+        let low = self.apply_rec(l_low, r_low, apply_op);
+        let high = self.apply_rec(l_high, r_high, apply_op);
+        self.new_node(decision_var, low, high)
+    }
+}
+
+mod apply_op {
+    pub fn and(l: Option<bool>, r: Option<bool>) -> Option<bool> {
+        match (l, r) {
+            (Some(true), Some(true)) => Some(true),
+            (Some(false), _) => Some(false),
+            (_, Some(false)) => Some(false),
+            _ => None,
+        }
+    }
+
+    pub fn or(l: Option<bool>, r: Option<bool>) -> Option<bool> {
+        match (l, r) {
+            (Some(false), Some(false)) => Some(false),
+            (Some(true), _) => Some(true),
+            (_, Some(true)) => Some(true),
+            _ => None,
+        }
+    }
+
+    pub fn xor(l: Option<bool>, r: Option<bool>) -> Option<bool> {
+        match (l, r) {
+            (Some(l), Some(r)) => Some(l ^ r),
+            _ => None,
+        }
+    }
+
+    pub fn imp(l: Option<bool>, r: Option<bool>) -> Option<bool> {
+        match (l, r) {
+            (Some(true), Some(false)) => Some(false),
+            (Some(false), _) => Some(true),
+            (_, Some(true)) => Some(true),
+            _ => None,
+        }
+    }
+
+    pub fn iff(l: Option<bool>, r: Option<bool>) -> Option<bool> {
+        match (l, r) {
+            (Some(l), Some(r)) => Some(l == r),
+            _ => None,
+        }
+    }
+}
+
+impl PeabodyInner {
+    pub(crate) fn and(&mut self, left: BddPointer, right: BddPointer) -> BddPointer {
+        self.apply_rec(left, right, apply_op::and)
+    }
+
+    pub(crate) fn or(&mut self, left: BddPointer, right: BddPointer) -> BddPointer {
+        self.apply_rec(left, right, apply_op::or)
+    }
+
+    pub(crate) fn xor(&mut self, left: BddPointer, right: BddPointer) -> BddPointer {
+        self.apply_rec(left, right, apply_op::xor)
+    }
+}
+
+impl<T: AsRef<Bdd>> BitAnd<T> for Bdd {
+    type Output = Bdd;
+
+    fn bitand(self, rhs: T) -> Self::Output {
+        Bdd::new(
+            &self.manager,
+            self.manager
+                .lock()
+                .unwrap()
+                .and(self.pointer, rhs.as_ref().pointer),
+        )
+    }
+}
+
+impl<T: AsRef<Bdd>> BitAnd<T> for &Bdd {
+    type Output = Bdd;
+
+    fn bitand(self, rhs: T) -> Self::Output {
+        Bdd::new(
+            &self.manager,
+            self.manager
+                .lock()
+                .unwrap()
+                .and(self.pointer, rhs.as_ref().pointer),
+        )
+    }
+}
+
+impl<T: AsRef<Bdd>> BitAndAssign<T> for Bdd {
+    fn bitand_assign(&mut self, rhs: T) {
+        *self = self.as_ref() & rhs;
+    }
+}
+
+impl<T: AsRef<Bdd>> BitOr<T> for Bdd {
+    type Output = Bdd;
+
+    fn bitor(self, rhs: T) -> Self::Output {
+        Bdd::new(
+            &self.manager,
+            self.manager
+                .lock()
+                .unwrap()
+                .or(self.pointer, rhs.as_ref().pointer),
+        )
+    }
+}
+
+impl<T: AsRef<Bdd>> BitOr<T> for &Bdd {
+    type Output = Bdd;
+
+    fn bitor(self, rhs: T) -> Self::Output {
+        Bdd::new(
+            &self.manager,
+            self.manager
+                .lock()
+                .unwrap()
+                .or(self.pointer, rhs.as_ref().pointer),
+        )
+    }
+}
+
+impl<T: AsRef<Bdd>> BitOrAssign<T> for Bdd {
+    fn bitor_assign(&mut self, rhs: T) {
+        *self = self.as_ref() | rhs;
+    }
+}
+
+impl<T: AsRef<Bdd>> BitXor<T> for Bdd {
+    type Output = Bdd;
+
+    fn bitxor(self, rhs: T) -> Self::Output {
+        Bdd::new(
+            &self.manager,
+            self.manager
+                .lock()
+                .unwrap()
+                .xor(self.pointer, rhs.as_ref().pointer),
+        )
+    }
+}
+
+impl<T: AsRef<Bdd>> BitXor<T> for &Bdd {
+    type Output = Bdd;
+
+    fn bitxor(self, rhs: T) -> Self::Output {
+        Bdd::new(
+            &self.manager,
+            self.manager
+                .lock()
+                .unwrap()
+                .xor(self.pointer, rhs.as_ref().pointer),
+        )
+    }
+}
+
+impl<T: AsRef<Bdd>> BitXorAssign<T> for Bdd {
+    fn bitxor_assign(&mut self, rhs: T) {
+        *self = self.as_ref() ^ rhs;
+    }
+}
+
+// impl Bdd {
+//     pub fn if_then_else(&self, _then: &Bdd, _else: &Bdd) -> Bdd {
+//         (self & _then) | (!self & _else)
+//     }
+// }
+
+#[cfg(test)]
+mod tests {
+    use crate::Peabody;
+
+    #[test]
+    fn test_not() {
+        let peabody = Peabody::new();
+        let a = peabody.ith_var(0);
+        assert_eq!(a, !!&a);
+    }
+
+    #[test]
+    fn test_and_or() {
+        let peabody = Peabody::new();
+        let a = peabody.ith_var(0);
+        let b = peabody.ith_var(1);
+        let and = &a & &b;
+        let or = !a | !b;
+        assert_eq!(and, !or);
     }
 }

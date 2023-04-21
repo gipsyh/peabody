@@ -1,125 +1,97 @@
-mod ops;
-use std::fmt::Debug;
-
-pub use ops::*;
+#![feature(assert_matches)]
 
 mod node;
+pub use node::*;
 
-use node::{BddNode, BddPointer, BddVariable};
+mod ops;
 
-#[derive(Clone, Eq, Hash, PartialEq)]
-pub struct Bdd(Vec<BddNode>);
+use fxhash::FxBuildHasher;
+use std::{
+    assert_matches::assert_matches,
+    collections::HashMap,
+    fmt::{self, Debug},
+    sync::{Arc, Mutex},
+};
 
-impl Bdd {
-    pub(crate) fn root_pointer(&self) -> BddPointer {
-        BddPointer::from(self.0.len() - 1)
+pub(crate) struct PeabodyInner {
+    nodes: Vec<BddNode>,
+    existing: HashMap<BddNode, BddPointer, FxBuildHasher>,
+}
+
+impl PeabodyInner {
+    #[inline]
+    pub(crate) fn var_of(&self, pointer: BddPointer) -> u16 {
+        self.nodes[pointer.0 as usize].var
     }
 
-    pub(crate) fn push_node(&mut self, node: BddNode) {
-        self.0.push(node);
+    #[inline]
+    pub(crate) fn low_of(&self, node: BddPointer) -> BddPointer {
+        self.nodes[node.0 as usize].low
     }
 
-    pub(crate) fn var_of(&self, node: BddPointer) -> BddVariable {
-        self.0[node.0 as usize].var
+    #[inline]
+    pub(crate) fn high_of(&self, node: BddPointer) -> BddPointer {
+        self.nodes[node.0 as usize].high
     }
 
-    pub(crate) fn low_link_of(&self, node: BddPointer) -> BddPointer {
-        self.0[node.0 as usize].low_link
-    }
-
-    pub(crate) fn high_link_of(&self, node: BddPointer) -> BddPointer {
-        self.0[node.0 as usize].high_link
+    #[inline]
+    pub fn new_node(&mut self, var: u16, low: BddPointer, high: BddPointer) -> BddPointer {
+        if low == high {
+            return low;
+        }
+        let node = BddNode { var, high, low };
+        if let Some(res) = self.existing.get(&node) {
+            return *res;
+        }
+        self.nodes.push(node.clone());
+        let point = BddPointer(self.nodes.len() as u32 - 1);
+        assert_matches!(self.existing.insert(node, point), None);
+        point
     }
 }
 
-impl Bdd {
-    pub fn num_node(&self) -> usize {
-        self.0.len()
+impl PeabodyInner {
+    pub fn new() -> Self {
+        let nodes = vec![BddNode::constant(false), BddNode::constant(true)];
+        let existing = HashMap::with_hasher(FxBuildHasher::default());
+        Self { nodes, existing }
     }
 
-    pub fn ith_var(var: usize) -> Self {
-        let mut bdd = Self::constant(true);
-        bdd.push_node(BddNode::mk_node(
-            var.into(),
+    pub fn ith_var(&mut self, var: usize) -> BddPointer {
+        self.new_node(
+            var as _,
             BddPointer::constant(false),
             BddPointer::constant(true),
-        ));
-        bdd
-    }
-
-    pub fn constant(val: bool) -> Self {
-        if val {
-            Bdd(vec![
-                BddNode::mk_constant(false),
-                BddNode::mk_constant(true),
-            ])
-        } else {
-            Bdd(vec![BddNode::mk_constant(false)])
-        }
-    }
-
-    pub fn is_constant(&self, val: bool) -> bool {
-        if val {
-            self.0.len() == 2
-        } else {
-            self.0.len() == 1
-        }
+        )
     }
 }
 
-impl AsRef<Bdd> for Bdd {
-    fn as_ref(&self) -> &Bdd {
-        self
+impl Debug for PeabodyInner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.nodes.fmt(f)
     }
 }
 
-impl Debug for Bdd {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self.sat_cubes())
-    }
+#[derive(Clone)]
+pub struct Peabody {
+    inner: Arc<Mutex<PeabodyInner>>,
 }
 
-impl Bdd {
-    pub fn sat_cubes_rec(
-        &self,
-        node: BddPointer,
-        cube: &mut Vec<isize>,
-        res: &mut Vec<Vec<isize>>,
-    ) {
-        if node.is_constant(false) {
-            return;
+impl Peabody {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(PeabodyInner::new())),
         }
-        if node.is_constant(true) {
-            res.push(cube.to_vec());
-            return;
-        }
-        let var = self.var_of(node).0 as isize;
-        cube.push(var);
-        self.sat_cubes_rec(self.high_link_of(node), cube, res);
-        cube.pop().unwrap();
-        cube.push(-var);
-        self.sat_cubes_rec(self.low_link_of(node), cube, res);
-        cube.pop().unwrap();
     }
 
-    pub fn sat_cubes(&self) -> Vec<Vec<isize>> {
-        let mut res = Vec::new();
-        let mut cube = Vec::new();
-        self.sat_cubes_rec(self.root_pointer(), &mut cube, &mut res);
-        res
+    pub fn ith_var(&self, var: usize) -> Bdd {
+        let pointer = self.inner.lock().unwrap().ith_var(var);
+        Bdd::new(&self.inner, pointer)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let a = Bdd::ith_var(0);
-        let b = Bdd::ith_var(1);
-        let and = &a & &b;
-        let or = !a | !b;
-        assert_eq!(and, !or);
+impl Debug for Peabody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.inner.lock().unwrap().fmt(f)
     }
 }
